@@ -37,9 +37,16 @@ from django.contrib.auth.views import (
 from django.shortcuts import render
 from django.http import HttpResponse
 from .forms import SMSForm
-import requests 
 from django.http import HttpRequest
 
+def get_user_role(request):
+    """Return (user_type, status) for any visitor, logged in or not."""
+    if request.user.is_authenticated:
+        if Restaurant.objects.filter(user=request.user).exists():
+            return "R", True
+        if NGO.objects.filter(user=request.user).exists():
+            return "N", True
+    return None, False
 
 def home(request):
     restaurants = Restaurant.objects.all() # Fetch only the first four restaurants
@@ -47,84 +54,40 @@ def home(request):
 
 def contact(request):
     if request.method == 'POST':
-        name = request.POST.get('name')
-        email = request.POST.get('email')
-        subject = request.POST.get('subject')
-        message = request.POST.get('message')
+        name = request.POST.get('name', '')
+        email = request.POST.get('email', '')
+        subject = request.POST.get('subject', '')
+        message = request.POST.get('message', '')
+        try:
+            send_mail(
+                subject='Contact Us: ' + subject,
+                message='Name: ' + name + '\nEmail: ' + email + '\n\nMessage: ' + message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[settings.DEFAULT_FROM_EMAIL],
+                fail_silently=False,
+            )
+        except Exception:
+            pass  # email may be unavailable on free hosting
 
-        # Perform any necessary validations on the form data
-
-        # Send email notification
-        send_mail(
-            subject='Contact Us: ' + subject,
-            message='Name: ' + name + '\nEmail: ' + email + '\n\nMessage: ' + message,
-            from_email=email,
-            recipient_list=[settings.DEFAULT_FROM_EMAIL],
-            fail_silently=False
-        )
-        
-    if request.user.is_authenticated:
-        if Restaurant.objects.filter(user=request.user).exists():
-            user_type = "R"  # User is a restaurant
-            status = True
-        elif NGO.objects.filter(user=request.user).exists():
-            user_type = "N"  # User is an NGO
-            status = True
-        else:
-            user_type = None  # User doesn't have a recognized role
-            status = False
-    else:
-        user_type = None  # User is not authenticated
+    user_type, status = get_user_role(request)
     return render(request, 'contact.html', {'user': user_type, 'status': status})
 
-def about(request):
-    if request.user.is_authenticated:
-        if Restaurant.objects.filter(user=request.user).exists():
-            user_type = "R"  # User is a restaurant
-            status = True
-        elif NGO.objects.filter(user=request.user).exists():
-            user_type = "N"  # User is an NGO
-            status = True
-        else:
-            user_type = None  # User doesn't have a recognized role
-            status = False
-    else:
-        user_type = None  # User is not authenticated
-    return render(request, 'about.html', {'user': user_type, 'status': status})
 
 def loginRegister(request):
     return render(request, 'login-register.html')
 
 
 def charity_view(request):
-    user_type = None
-    status = False
-    if request.user.is_authenticated:
-        if Restaurant.objects.filter(user=request.user).exists():
-            user_type = "R"  # User is a restaurant
-            status = True
-            available_charities = NGO.objects.filter(is_verified=True)  # Fetch verified NGOs
-        elif NGO.objects.filter(user=request.user).exists():
-            user_type = "N"  # User is an NGO
-            status = True
-        else:
-            user_type = None  # User doesn't have a recognized role
+    user_type, status = get_user_role(request)
+    charities = NGO.objects.filter(is_verified=True) if user_type == "R" else []
+    return render(request, 'charity.html', {'user': user_type, 'status': status, 'charities': charities})
 
-    return render(request, 'charity.html', {'user': user_type, 'status': status, 'charities': available_charities})
 
 def restaurant_view(request):
-    user_type = None
-    status = False
+    user_type, status = get_user_role(request)
+    restaurants = Restaurant.objects.filter(is_verified=True) if user_type == "N" else []
+    return render(request, 'restaurant.html', {'user': user_type, 'status': status, 'restaurants': restaurants})
 
-    if request.user.is_authenticated:
-        if NGO.objects.filter(user=request.user).exists():
-            user_type = "N"  # User is an NGO
-            status = True
-            available_restaurants = Restaurant.objects.filter(is_verified=True)  # Fetch verified restaurants
-        else:
-            user_type = None  # User doesn't have a recognized role
-
-    return render(request, 'restaurant.html', {'user': user_type, 'status': status, 'restaurants': available_restaurants})
 
 def restaurant_detail(request, restaurant_id):
     restaurant = get_object_or_404(Restaurant, pk=restaurant_id)
@@ -132,19 +95,8 @@ def restaurant_detail(request, restaurant_id):
 
 
 def requestsR_view(request):
-    if request.user.is_authenticated:
-        if Restaurant.objects.filter(user=request.user).exists():
-            user_type = "R"  # User is a restaurant
-            status = True
-        elif NGO.objects.filter(user=request.user).exists():
-            user_type = "N"  # User is an NGO
-            status = True
-        else:
-            user_type = None  # User doesn't have a recognized role
-            status = False
-    else:
-        user_type = None  # User is not authenticated
-    return render(request,'requestsR.html', {'user': user_type, 'status': status})
+    user_type, status = get_user_role(request)
+    return render(request, 'requestsR.html', {'user': user_type, 'status': status})
 
 def requestsN_view(request):
     return render(request,'requestsN.html')
@@ -388,10 +340,6 @@ from django.utils import timezone
 from django.shortcuts import render, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import LabelEncoder
-from keras.models import load_model
 
 
 @login_required

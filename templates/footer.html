@@ -1,0 +1,39 @@
+<footer class="footer">
+    <div class="container">
+        <div class="row">
+            <div class="col-md-6 col-lg-4 mb-4 mb-md-0">
+                <h2 class="footer-heading">Food Bridge.</h2>
+                <p>Food Bridge aims to reduce food waste in restaurants by facilitating the donation of surplus food to charities.</p>
+                {% if user == 'R' %}
+                    <p><a href="/donate/" class="btn btn-quarternary">Get Involved</a></p>
+                {% elif user == 'N' %}
+                    <p><a href="/browse_donations/" class="btn btn-quarternary">Get Involved</a></p>
+                {% else %}
+                    <p><a href="/login-register/" class="btn btn-quarternary">Get Involved</a></p>
+                {% endif %}
+            </div>
+            <div class="col-md-6 col-lg-4 pl-lg-5 mb-4 mb-md-0">
+                <h2 class="footer-heading">Quick Links</h2>
+                <ul class="list-unstyled">
+                    <li><a href="/" class="py-2 d-block">Home</a></li>
+                    <li><a href="/contact/" class="py-2 d-block">Contact</a></li>
+                    {% if request.user.is_authenticated %}
+                        <li><a href="/logout/" class="py-2 d-block">Log Out</a></li>
+                    {% else %}
+                        <li><a href="/login-register/" class="py-2 d-block">Log In</a></li>
+                    {% endif %}
+                </ul>
+            </div>
+            <div class="col-md-6 col-lg-4 mb-4 mb-md-0">
+                <h2 class="footer-heading">Have Questions?</h2>
+                <div class="block-23 mb-3">
+                    <ul>
+                        <li><span class="icon fa fa-map"></span><span class="text">Food Bridge, Tripoli, Lebanon</span></li>
+                        <li><a href="#" style="margin: 0;"><span class="icon fa fa-phone"></span><span class="text">+961 1234 567</span></a></li>
+                        <li><a href="mailto:FoodBridge.hr@gmail.com" style="margin: 0;"><span class="icon fa fa-paper-plane"></span><span class="text">FoodBridge.hr@gmail.com</span></a></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</footer>

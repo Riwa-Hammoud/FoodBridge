@@ -31,7 +31,7 @@
                                 <img src="{{ request.user.restaurant.profile_picture.url }}" alt="Profile Picture" class="profile-image" style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">
                               {% else %}
                                 <!-- Display a default icon if the profile picture is not set -->
-                                <img src="../../media/media/default-profile.png" alt="Default Icon" style="width: 30px;">
+                                <img src="/media/media/default-profile.webp" alt="Default Icon" style="width: 30px;">
                               {% endif %}
                             </a>
                           </li>
@@ -45,7 +45,7 @@
                                     <img src="{{ request.user.ngo.profile_picture.url }}" alt="Profile Picture" class="profile-img"  style="width: 50px; height: 50px; border-radius: 50%; object-fit: cover;">
                                 {% else %}
                                     <!-- Display a default icon if the profile picture is not set -->
-                                    <img src="../../media/media/default-profile.png" alt="Default Icon" class="profile" style="width: 30px !important;">
+                                    <img src="/media/media/default-profile.webp" alt="Default Icon" class="profile" style="width: 30px !important;">
                                 {% endif %}
                             </a>
                         </li>
