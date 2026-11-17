@@ -12,6 +12,11 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# Static & Media Files
+# Ignore the folder where 'collectstatic' dumps production assets,
+# NOT your source 'static/' folders containing your CSS and JS.
+staticfiles/
+
 # Secrets & Environment Variables
 .env
 .env.local
