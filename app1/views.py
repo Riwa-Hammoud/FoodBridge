@@ -234,38 +234,34 @@ def login(request):
             return render(request, 'login-register.html')
     else:
         return render(request, 'login-register.html', {"user": None})
-    
-# def dashboard(request, user):
-#     if user == "AnonymousUser":
-#         return redirect('home')
-
-#     show_get_started_modal = False
-#     if request.user.is_authenticated and not (request.user.is_superuser or request.user.profile.is_modal_displayed):
-#         show_get_started_modal = True
-#         request.user.profile.is_modal_displayed = True
-#         request.user.profile.save()
-
-#     return render(request, 'index.html', {'user': user, 'show_get_started_modal': show_get_started_modal})
 
 
 def dashboard(request, user):
-    print(user)
     status = False
-    if request.user:
+    name = ""
+
+    if request.user.is_authenticated:
         if user == "R":
             restaurant = Restaurant.objects.get(user=request.user)
-            print(restaurant)
-            name = restaurant
+            name = restaurant.name
+
         elif user == "N":
             ngo = NGO.objects.get(user=request.user)
-            name = ngo
-        status = request.user
-    if user == "AnonymousUser":
-        name=""
-        return redirect('home')
-    user_name=""
+            name = ngo.name
 
-    return render(request, 'index.html', {'user': user, "status": status, 'user_name':name})
+        status = request.user
+
+    if user == "AnonymousUser":
+        return redirect('home')
+
+    restaurants = Restaurant.objects.all()
+
+    return render(request, 'index.html', {
+        'user': user,
+        'status': status,
+        'user_name': name,
+        'restaurants': restaurants
+    })
 
 
 def logout_view(request):
@@ -273,7 +269,7 @@ def logout_view(request):
     Session.objects.filter(session_key__startswith=request.session.session_key[:10]).delete()
     auth.logout(request)
     print('logout')
-    return render(request,'index.html')
+    return redirect('home')
 
 
 class PasswordResetRequestView(PasswordResetView):
