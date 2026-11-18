@@ -79,32 +79,36 @@ class NGOAdmin(admin.ModelAdmin):
 
 
 class DonationAdmin(admin.ModelAdmin):
-    confirmed = models.BooleanField(default=False)
-    list_display = ('name','restaurant', 'ngo', 'delivery_time','created_on','confirmed','expiration_date','requested','quantity')
-    readonly_fields = ()
+    list_display = ('name', 'restaurant', 'ngo', 'delivery_time', 'created_on', 'confirmed', 'expiration_date', 'requested', 'quantity')
 
     def get_queryset(self, request):
-        # Only display donations for the current user
         qs = super().get_queryset(request)
         if request.user.is_superuser:
-            # Superusers can see all donations
             return qs
-        elif hasattr(request.user, 'ngo'):
+        if hasattr(request.user, 'ngo'):
             return qs.filter(ngo=request.user.ngo)
-        elif hasattr(request.user, 'restaurant'):
+        if hasattr(request.user, 'restaurant'):
             return qs.filter(restaurant=request.user.restaurant)
-        else:
-            # Non-ngo or Non-restaurant users won't see any donations
-            return qs.none()
+        return qs.none()
 
     def get_readonly_fields(self, request, obj=None):
-        if hasattr(request.user, 'ngo'):  # Editing an existing NGO user
-            return self.readonly_fields + ('confirmed',)
-        if hasattr(request.user, 'restaurant'):  # Editing an existing restaurant user
-            return self.readonly_fields + ('donation_date', 'delivery_time')
+        if request.user.is_superuser:
+            return ()
+        if hasattr(request.user, 'ngo'):
+            return ('confirmed', 'restaurant', 'ngo')
+        if hasattr(request.user, 'restaurant'):
+            return ('restaurant', 'donation_date', 'delivery_time', 'requested')
+        return ()
 
-        return self.readonly_fields
-    
+    def has_add_permission(self, request):
+        if hasattr(request.user, 'ngo') and not request.user.is_superuser:
+            return False
+        return super().has_add_permission(request)
+
+    def save_model(self, request, obj, form, change):
+        if not change and hasattr(request.user, 'restaurant'):
+            obj.restaurant = request.user.restaurant
+        super().save_model(request, obj, form, change)
 
 
 admin.site.register(Donation, DonationAdmin)

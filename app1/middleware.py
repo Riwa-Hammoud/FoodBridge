@@ -1,52 +1,31 @@
-from django.shortcuts import redirect, HttpResponse, render
-from django.urls import reverse
-from django.contrib.auth import logout
+import logging
+
+from django.shortcuts import redirect
+
+from .permissions import get_role
+
+AUTH_PAGES = {'/login-register/', '/login/', '/register/'}
+
 
 class RedirectHomeMiddleware:
+    """Send visitors to the right page. Views enforce access on their own."""
+
     def __init__(self, get_response):
         self.get_response = get_response
 
     def __call__(self, request):
-        if not request.user.is_authenticated and request.path.startswith('/dashboard/'):
-            return redirect('/login/')
-        elif request.user.is_authenticated and request.path in ('/login-register/', '/login/', '/register/'):
-            if request.user.groups.filter(name='PermissionOfRestaurant').exists():
-                return redirect('/dashboard/R/')
-            elif request.user.groups.filter(name='PermissionOfNGO').exists():
-                return redirect('/dashboard/N/')
-            else:
-                return redirect ('/logout/')
-        elif request.user.is_authenticated and request.path == '/':
-            if request.user.groups.filter(name='PermissionOfRestaurant').exists():
-                return redirect('/dashboard/R/')
-            elif request.user.groups.filter(name='PermissionOfNGO').exists():
-                return redirect('/dashboard/N/')
-        elif not request.user.is_authenticated and request.path == '/logout/':
-            return redirect('/')
-        if request.user.is_authenticated and request.user.groups.filter(name='PermissionOfRestaurant').exists():
-            if  request.path == '/dashboard/N/':
-                return redirect('/dashboard/R/')
-        elif request.user.is_authenticated and request.user.groups.filter(name='PermissionOfNGO').exists():
-            if  request.path == '/dashboard/R/':
-                return redirect('/dashboard/N/')
-        elif request.user.is_authenticated and request.path.startswith('/admin/') and (request.user.groups.filter(name='PermissionOfNGO').exists() or request.user.groups.filter(name='PermissionOfRestaurant').exists()):
-            return redirect(reverse('admin:index'))
-
+        path = request.path
+        if not request.user.is_authenticated:
+            if path.startswith('/dashboard/'):
+                return redirect('/login/')
+            if path == '/logout/':
+                return redirect('/')
+        else:
+            role = get_role(request.user)
+            if role and (path == '/' or path in AUTH_PAGES):
+                return redirect(f'/dashboard/{role}/')
         return self.get_response(request)
-    
-# class PermissionMiddleware:
-#     def __init__(self, get_response):
-#         self.get_response = get_response
 
-#     def __call__(self, request):
-#         # Check permission logic here
-#         if not request.user.has_perm('app1.can_donate_food'):
-#             return HttpResponse('You do not have permission to donate food.')
-
-#         response = self.get_response(request)
-#         return response
-    
-import logging
 
 class LoggingMiddleware:
     def __init__(self, get_response):
@@ -54,15 +33,7 @@ class LoggingMiddleware:
         self.logger = logging.getLogger(__name__)
 
     def __call__(self, request):
-        # Logging logic before processing the request
-        self.logger.info('Request: {} {}'.format(request.method, request.path))
-        
+        self.logger.info('Request: %s %s', request.method, request.path)
         response = self.get_response(request)
-        
-        # Logging logic after processing the request
-        if isinstance(response, HttpResponse):
-            self.logger.info('Response: {} {}'.format(response.status_code, response.reason_phrase))
-        else:
-            self.logger.warning('Response: {}'.format(response))
-
+        self.logger.info('Response: %s %s', response.status_code, response.reason_phrase)
         return response

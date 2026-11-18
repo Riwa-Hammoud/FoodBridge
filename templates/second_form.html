@@ -481,7 +481,7 @@
                             <select class="form-control input" id="ngo" name="ngo" required>
                                 <option value="" selected disabled hidden></option>
                                 {% for ngo in ngos %}
-                                <option value="{{ ngo.name }}">{{ ngo.name }}</option>
+                                <option value="{{ ngo.pk }}">{{ ngo.name }}</option>
                                 {% endfor %}
                             </select>
                         </div>

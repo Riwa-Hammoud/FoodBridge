@@ -1,56 +1,94 @@
-from email.message import EmailMessage
-from django.views.decorators.csrf import csrf_protect
-from django.shortcuts import get_object_or_404, render, redirect
-from django.contrib.auth.models import User
-from app1.forms import PasswordResetConfirmationForm, PasswordResetRequestForm
-from app1 import forms
-from .models import Restaurant, NGO, Donation
-from django.contrib.auth.decorators import login_required
-from django.contrib import auth
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from django.utils.encoding import force_bytes, force_str
-from django.contrib.auth.tokens import default_token_generator
-from django.contrib import messages
-from django.contrib.sites.shortcuts import get_current_site
-from django.template.loader import render_to_string
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
-from django.utils.encoding import force_bytes, force_str
-from django.contrib.auth.tokens import default_token_generator
-from django.contrib import messages
-from django.shortcuts import redirect, render
-from django.utils.html import strip_tags
-from django.db import IntegrityError
-from django.core.exceptions import ValidationError
-from django.core.mail import send_mail
-from django.core.mail import EmailMessage
-from django.template.loader import render_to_string
-from django.shortcuts import render, redirect
-from django.contrib.sessions.models import Session
-from django.conf import settings
-from django.http import HttpResponseRedirect
-from django.contrib.auth.views import (
-    PasswordResetView,
-    PasswordResetDoneView,
-    PasswordResetConfirmView,
-    PasswordResetCompleteView,
-)
-from django.shortcuts import render
-from django.http import HttpResponse
-from .forms import SMSForm
-from django.http import HttpRequest
+import logging
+from smtplib import SMTPException
 
-def get_user_role(request):
-    """Return (user_type, status) for any visitor, logged in or not."""
-    if request.user.is_authenticated:
-        if Restaurant.objects.filter(user=request.user).exists():
-            return "R", True
-        if NGO.objects.filter(user=request.user).exists():
-            return "N", True
-    return None, False
+from django.conf import settings
+from django.contrib import auth, messages
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.models import User
+from django.contrib.auth.tokens import default_token_generator
+from django.contrib.auth.views import (
+    PasswordResetCompleteView,
+    PasswordResetConfirmView,
+    PasswordResetView,
+)
+from django.contrib.sites.shortcuts import get_current_site
+from django.core.mail import EmailMessage, send_mail
+from django.db import transaction
+from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
+from django.urls import reverse_lazy
+from django.utils.dateparse import parse_time
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from django.views.decorators.http import require_http_methods, require_POST
+
+from .forms import (
+    NGOProfileForm,
+    PasswordResetConfirmationForm,
+    PasswordResetRequestForm,
+    RegistrationForm,
+    RestaurantProfileForm,
+)
+from .models import NGO, Donation, Restaurant
+from .permissions import (
+    ROLE_NGO,
+    ROLE_RESTAURANT,
+    get_profile,
+    get_role,
+    ngo_required,
+    restaurant_required,
+)
+
+logger = logging.getLogger(__name__)
+
+PROFILE_FORMS = {
+    ROLE_RESTAURANT: (RestaurantProfileForm, 'profile.restaurant.html'),
+    ROLE_NGO: (NGOProfileForm, 'profile.ngo.html'),
+}
+
+
+# helpers
+
+def page_context(request, **extra):
+    """Context the nav and footer templates expect ('user' is the role letter)."""
+    role = get_role(request.user)
+    return {'user': role, 'status': role is not None, **extra}
+
+
+def send_email(subject, body, to, html=False):
+    """Send an email without crashing the request if SMTP is unavailable."""
+    message = EmailMessage(subject, body, from_email=settings.DEFAULT_FROM_EMAIL, to=[to])
+    if html:
+        message.content_subtype = 'html'
+    try:
+        message.send()
+    except (SMTPException, OSError):
+        logger.exception('Could not send email to %s', to)
+        return False
+    return True
+
+
+def flash_form_errors(request, form):
+    for field, errors in form.errors.items():
+        prefix = '' if field == '__all__' else f'{field.replace("_", " ").title()}: '
+        for error in errors:
+            messages.error(request, prefix + error)
+
+
+def home_context(request):
+    profile = get_profile(request.user)
+    return page_context(
+        request,
+        user_name=profile.name if profile else '',
+        restaurants=Restaurant.objects.filter(is_verified=True),
+    )
+
+
+# public pages
 
 def home(request):
-    restaurants = Restaurant.objects.all() # Fetch only the first four restaurants
-    return render(request, 'index.html',{'restaurants':restaurants})
+    return render(request, 'index.html', home_context(request))
+
 
 def contact(request):
     if request.method == 'POST':
@@ -67,601 +105,326 @@ def contact(request):
                 fail_silently=False,
             )
         except Exception:
-            pass  # email may be unavailable on free hosting
-
-    user_type, status = get_user_role(request)
-    return render(request, 'contact.html', {'user': user_type, 'status': status})
+            logger.exception('Contact form email failed')
+    return render(request, 'contact.html', page_context(request))
 
 
 def loginRegister(request):
     return render(request, 'login-register.html')
 
 
-def charity_view(request):
-    user_type, status = get_user_role(request)
-    charities = NGO.objects.filter(is_verified=True) if user_type == "R" else []
-    return render(request, 'charity.html', {'user': user_type, 'status': status, 'charities': charities})
+# authentication
+
+def send_verification_email(request, user):
+    body = render_to_string('verify_email.html', {
+        'user': user,
+        'protocol': 'https' if request.is_secure() else 'http',
+        'domain': get_current_site(request).domain,
+        'uid': urlsafe_base64_encode(force_bytes(user.pk)),
+        'token': default_token_generator.make_token(user),
+    })
+    return send_email('Activate Your Account', body, user.email, html=True)
 
 
-def restaurant_view(request):
-    user_type, status = get_user_role(request)
-    restaurants = Restaurant.objects.filter(is_verified=True) if user_type == "N" else []
-    return render(request, 'restaurant.html', {'user': user_type, 'status': status, 'restaurants': restaurants})
-
-
-def restaurant_detail(request, restaurant_id):
-    restaurant = get_object_or_404(Restaurant, pk=restaurant_id)
-    return render(request, 'restaurant_detail.html', {'restaurant': restaurant})
-
-
-def requestsR_view(request):
-    user_type, status = get_user_role(request)
-    return render(request, 'requestsR.html', {'user': user_type, 'status': status})
-
-def requestsN_view(request):
-    return render(request,'requestsN.html')
-
-
+@require_http_methods(['GET', 'POST'])
 def register(request):
-    if request.method == 'POST':
-        password = request.POST['password']
-        name = request.POST['name']
-        email = request.POST['email']
-        phone = request.POST['phone']
-        location=request.POST['location']
-        choice = request.POST.get('choice')
-
-        try:
-            user = User.objects.get(username=name)
-            return render(request, 'login-register.html')
-        except User.DoesNotExist:
-            # add this if only active users log in ,is_active=False
-            user = User.objects.create_user(username=name, password=password, is_active = False)
-
-            print()
-            if choice == 'Restaurant':
-                restaurant = Restaurant(name=name, contact_email=email, contact_phone=phone, user=user,location=location, is_verified= False)
-                restaurant.save()
-                print('Registered as a Restaurant')
-            elif choice == 'Charity':
-                ngo = NGO(name=name, contact_email=email, contact_phone=phone, user=user,location=location,is_verified= False)
-                ngo.save()
-                print('Registered as an NGO')
-            else:
-                # Handle registration for other roles if needed
-                pass
-            
-            # Send email for account activation
-            current_site = get_current_site(request)
-            mail_subject = 'Activate Your Account'
-            message = render_to_string('verify_email.html', {
-                'user': user,
-                'protocol': 'http',
-                'domain': current_site.domain,
-                'uid': urlsafe_base64_encode(force_bytes(user.pk)),
-                'token': default_token_generator.make_token(user),
-            })
-            email_message = EmailMessage(
-            subject=mail_subject,
-            body=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            to=[email],
-            )
-            email_message.content_subtype = 'html'
-            email_message.send()
-            print('Registered Successfully')
-            return render(request, 'login-register.html')
-        
-        except IntegrityError as e:
-            error_message = f"An error occurred during registration: {str(e)}"
-            return render(request, 'login-register.html', {'error_message': error_message})
-
-        except ValidationError as e:
-            error_message = e.message
-            return render(request, 'login-register.html', {'error_message': error_message})
-    else:
+    if request.method == 'GET':
         return render(request, 'login-register.html')
+
+    form = RegistrationForm(request.POST)
+    if not form.is_valid():
+        flash_form_errors(request, form)
+        return render(request, 'login-register.html', {'signup': True})
+
+    data = form.cleaned_data
+    with transaction.atomic():
+        user = User.objects.create_user(
+            username=data['name'], email=data['email'],
+            password=data['password'], is_active=False,
+        )
+        profile_model = Restaurant if data['choice'] == 'Restaurant' else NGO
+        profile_model.objects.create(
+            user=user, name=data['name'], contact_email=data['email'],
+            contact_phone=data['phone'], location=data['location'],
+        )
+        sent = send_verification_email(request, user)
+        if not sent:
+            transaction.set_rollback(True)  # no email, no half-created account
+
+    if not sent:
+        messages.error(request, 'We could not send the verification email. Please try again later.')
+        return render(request, 'login-register.html', {'signup': True})
+    messages.success(request, 'Account created. Check your email to verify it before logging in.')
+    return render(request, 'login-register.html')
 
 
 def verify_email(request, uidb64, token):
     try:
-        uid = force_str(urlsafe_base64_decode(uidb64))
-        user = User.objects.get(pk=uid)
+        user = User.objects.get(pk=force_str(urlsafe_base64_decode(uidb64)))
     except (TypeError, ValueError, OverflowError, User.DoesNotExist):
         user = None
 
-    if user is not None and default_token_generator.check_token(user, token):
-        user.is_active = True
-        user.save()
+    if user is None or not default_token_generator.check_token(user, token):
+        messages.error(request, 'Invalid or expired verification link.')
+        return render(request, 'login-register.html')
 
-        try:
-            restaurant = Restaurant.objects.get(user=user)
+    profile = get_profile(user)
+    if profile is None:
+        messages.error(request, 'No restaurant or charity is linked to this account.')
+        return render(request, 'login-register.html')
+
+    if not profile.is_verified:  # a used link can never re-activate a disabled account
+        with transaction.atomic():
             user.is_active = True
-            restaurant.is_verified = True
-            restaurant.save()
-            return redirect('/login/', {'message': 'Your accoumt is verified now'})
-        except Restaurant.DoesNotExist:
-            try:
-                ngo = NGO.objects.get(user=user)
-                user.is_active= True
-                ngo.is_verified = True
-                ngo.save()
-                return redirect('/login/', {'message': 'Your accoumt is verified now'})
-            except NGO.DoesNotExist:
-                messages.error(request, 'Associated restaurant or Charity does not exist.')
-                return render(request, 'login-register.html', {'message': 'Associated restaurant or Charity does not exist. Verification failed'})
-    else:
-        messages.error(request, 'Invalid verification link.')
-        return render(request, 'login-register.html', {'message': 'Invalid verification link. Verification failed'})
-    
+            user.save(update_fields=['is_active'])
+            profile.is_verified = True
+            profile.save(update_fields=['is_verified'])
+    messages.success(request, 'Your email is verified. You can log in now.')
+    return redirect('login')
 
 
+@require_http_methods(['GET', 'POST'])
 def login(request):
-    if request.method == 'POST':
-        try:
-            # Check User in DB
-            username = request.POST['username']
-            password = request.POST['password']
-            user = auth.authenticate(username=username, password=password)  # Renamed 'user_authenticate' to 'user'
-            if user is not None:  # Simplified the condition
-                if user.is_active:
-                    try:
-                        restaurant = Restaurant.objects.get(user=user)  # Moved 'restaurant' and 'ngo' inside this block
-                        if restaurant.is_verified:
-                            auth.login(request, user)
-                            print('Restaurant has been Logged')
-                            return redirect('dashboard', user="R")
-                        else:
-                            return render(request, 'login-register.html', {'message': 'Your email is not verified yet'})
-                    except Restaurant.DoesNotExist:
-                        try:
-                            ngo = NGO.objects.get(user=user)
-                            if ngo.is_verified:
-                                auth.login(request, user)
-                                print('NGO has been Logged')
-                                return redirect('dashboard', user="N")
-                            else:
-                                return render(request, 'login-register.html', {'message': 'Your email is not verified yet'})
-                        except NGO.DoesNotExist:
-                            return redirect('/')
-                else:
-                    messages.error(request, 'Your account is disabled.')
-            else:
-                print('Login Failed')
-                return render(request, 'login-register.html', {'message': 'Invalid email or password'})
-        except:
-            print('Login Failed')
-            return render(request, 'login-register.html')
-    else:
-        return render(request, 'login-register.html', {"user": None})
+    if request.method == 'GET':
+        return render(request, 'login-register.html')
 
+    username = request.POST.get('username', '').strip()
+    password = request.POST.get('password', '')
+    user = auth.authenticate(request, username=username, password=password)
 
-def dashboard(request, user):
-    status = False
-    name = ""
+    if user is None:
+        inactive = User.objects.filter(username=username, is_active=False).first()
+        if inactive and inactive.check_password(password):
+            messages.error(request, 'Please verify your email before logging in.')
+        else:
+            messages.error(request, 'Invalid username or password.')
+        return render(request, 'login-register.html')
 
-    if request.user.is_authenticated:
-        if user == "R":
-            restaurant = Restaurant.objects.get(user=request.user)
-            name = restaurant.name
+    profile = get_profile(user)
+    if profile is None:
+        messages.error(request, 'This account is not linked to a restaurant or charity.')
+        return render(request, 'login-register.html')
+    if not profile.is_verified:
+        messages.error(request, 'Your account is not verified yet.')
+        return render(request, 'login-register.html')
 
-        elif user == "N":
-            ngo = NGO.objects.get(user=request.user)
-            name = ngo.name
-
-        status = request.user
-
-    if user == "AnonymousUser":
-        return redirect('home')
-
-    restaurants = Restaurant.objects.all()
-
-    return render(request, 'index.html', {
-        'user': user,
-        'status': status,
-        'user_name': name,
-        'restaurants': restaurants
-    })
+    auth.login(request, user)
+    return redirect('dashboard', user=get_role(user))
 
 
 def logout_view(request):
-    # Clear all sessions associated with the user
-    Session.objects.filter(session_key__startswith=request.session.session_key[:10]).delete()
     auth.logout(request)
-    print('logout')
     return redirect('home')
 
+
+@login_required
+def dashboard(request, user):
+    role = get_role(request.user)
+    if role is None:
+        return redirect('home')
+    if user != role:
+        return redirect('dashboard', user=role)
+    return render(request, 'index.html', home_context(request))
+
+
+# password reset
 
 class PasswordResetRequestView(PasswordResetView):
     form_class = PasswordResetRequestForm
     template_name = 'password_reset_request.html'
-    success_url = '/password_reset/done/'
+    html_email_template_name = 'password_reset_email.html'
+    success_url = reverse_lazy('password_reset_done')
 
     def form_valid(self, form):
-        email = form.cleaned_data['email']
-        subject = 'Password Reset'
-        recipient_list = [email]
         try:
-            ngo = NGO.objects.get(contact_email=email)
-            user = ngo.user
-        except NGO.DoesNotExist:
-            # User not found in the NGO model, search in the Restaurant model
-            try:
-                restaurant = Restaurant.objects.get(contact_email=email)
-                user = restaurant.user
-            except Restaurant.DoesNotExist:
-                # User not found in both the NGO and Restaurant models
-                # Handle the case when the user does not exist
-                # You can show an error message or redirect the user to an appropriate page
-                return HttpResponse("User does not exist.")
-        
-        current_site = get_current_site(self.request)
-        
-        message = render_to_string('password_reset_email.html', {
-            'user': user,
-            'protocol': 'http',
-            'domain': current_site.domain,
-            'uid': urlsafe_base64_encode(force_bytes(user.pk)),
-            'token': default_token_generator.make_token(user),
-        })
-        email_message = EmailMessage(
-        subject= subject,
-        body=message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        to=recipient_list,
-        )
-        email_message.content_subtype = 'html'
-        email_message.send()
-        
-        return super().form_valid(form)
-
-
+            return super().form_valid(form)
+        except (SMTPException, OSError):
+            logger.exception('Password reset email failed')
+            messages.error(self.request, 'We could not send the email right now. Please try again later.')
+            return self.form_invalid(form)
 
 
 class PasswordResetConfirmationView(PasswordResetConfirmView):
     form_class = PasswordResetConfirmationForm
     template_name = 'password_reset_confirm.html'
-    success_url = '/password_reset/complete/'
-    print("done")
-    
+    success_url = reverse_lazy('password_reset_complete')
 
 
 class CustomPasswordResetCompleteView(PasswordResetCompleteView):
     template_name = 'password_reset_complete.html'
 
 
-import json
-from datetime import date
-from django.utils import timezone
-from django.shortcuts import render, get_object_or_404
-from django.contrib.auth.decorators import login_required
-from django.http import JsonResponse
+# restaurant side
 
-
-@login_required
-def add_donation(request):
-    # Fetch the current restaurant
-    restaurant = get_object_or_404(Restaurant, user=request.user)
-
-    # Fetch the updated list of donations for the current restaurant
-    donations = Donation.objects.filter(restaurant=restaurant)
-
-    # Group donations based on their status
-    todo_donations = donations.filter(requested=False)
-    inprogress_donations = donations.filter(requested=True, confirmed=False)
-    done_donations = donations.filter(requested=True, confirmed=True)
-
-    if Restaurant.objects.filter(user=request.user).exists():
-        user_type = "R"  # User is a restaurant
-        status = True
-    elif NGO.objects.filter(user=request.user).exists():
-        user_type = "N"  # User is an NGO
-        status = True
-    else:
-        user_type = None  # User doesn't have a recognized role
-        status = False
-
-    ngos = NGO.objects.all()
-
+def available_ngos(restaurant):
+    ngos = NGO.objects.filter(is_verified=True)
     if restaurant.name == "Aquaria":
         ngos = ngos.filter(location__in=['Mina', 'Al-Tal'])
-    
     if restaurant.name == "hallab":
         ngos = ngos.filter(location__in=['Tripoli Zeitoun', 'Al-Mina'])
-
     if restaurant.name == "Baytuna":
-        ngos = ngos.filter(location__in=['Tripoli Zeitoun', 'Al-Mina','Al-Tabbaneh'])
+        ngos = ngos.filter(location__in=['Tripoli Zeitoun', 'Al-Mina', 'Al-Tabbaneh'])
+    return ngos
 
 
-
-    
-
-
-    if request.method == 'POST':
-        if 'next_button' in request.POST:
-            # Handle the next button (form part 1)
-            # Process the form data from the first part of the form
-            quantity_value = int(request.POST.get('food_quantity'))
-            expiration_date = request.POST.get('expiration_date')
-            food_condition = request.POST.get('food_condition')
-            packaging = request.POST.get('packaging')
-            transportation = request.POST.get('transportation')
-
-            if quantity_value < 50:
-                quantity_category = "less than 50"
-            elif 50 <= quantity_value < 100:
-                quantity_category = "50-100"
-            elif 100 <= quantity_value < 200:
-                quantity_category = "100-200"
-            elif 200 <= quantity_value < 500:
-                quantity_category = "200-500"
-            else:
-                quantity_category = "more than 500"
-
-            # Create a new Donation object without the missing fields
-            donation = Donation.objects.create(
-                restaurant=restaurant,
-                quantity=quantity_category,
-                expiration_date=expiration_date,
-                food_condition=food_condition,
-                packaging=packaging,
-                transportation=transportation
-            )
-
-            # Store the donation ID in the session or database, depending on your requirements
-            request.session['donation_id'] = donation.id
-
-            # Redirect to the second part of the form
-            return render(request, 'second_form.html', {'ngos': ngos, 'user':user_type, 'status':status})  # Replace with the URL for the second form
-
-    context = {
-        'donations': donations,
-        'ngos': ngos,
-        'todo_donations': todo_donations,
-        'inprogress_donations': inprogress_donations,
-        'done_donations': done_donations,
-        'user': user_type,
-        'status': status
-    }
-
-    return render(request, 'donations.html', context)
+def quantity_category(value):
+    if value < 50:
+        return "less than 50"
+    if value < 100:
+        return "50-100"
+    if value < 200:
+        return "100-200"
+    if value < 500:
+        return "200-500"
+    return "more than 500"
 
 
-def submit_donation(request):
-    # Fetch the current restaurant
-    restaurant = get_object_or_404(Restaurant, user=request.user)
+@restaurant_required
+def add_donation(request):
+    restaurant = request.user.restaurant
+    ngos = available_ngos(restaurant)
 
-    # Fetch the updated list of donations for the current restaurant
+    if request.method == 'POST' and 'next_button' in request.POST:
+        try:
+            quantity_value = int(request.POST.get('food_quantity', ''))
+        except ValueError:
+            return redirect('donate')
+        if quantity_value < 1:
+            return redirect('donate')
+
+        donation = Donation.objects.create(
+            restaurant=restaurant,
+            quantity=quantity_category(quantity_value),
+            expiration_date=request.POST.get('expiration_date'),
+            food_condition=request.POST.get('food_condition'),
+            packaging=request.POST.get('packaging'),
+            transportation=request.POST.get('transportation'),
+        )
+        request.session['donation_id'] = donation.id
+        return render(request, 'second_form.html', page_context(request, ngos=ngos))
+
     donations = Donation.objects.filter(restaurant=restaurant)
+    return render(request, 'donations.html', page_context(
+        request,
+        donations=donations,
+        ngos=ngos,
+        todo_donations=donations.filter(requested=False),
+        inprogress_donations=donations.filter(requested=True, confirmed=False),
+        done_donations=donations.filter(requested=True, confirmed=True),
+    ))
 
-    # Group donations based on their status
-    todo_donations = donations.filter(requested=False)
-    inprogress_donations = donations.filter(requested=True, confirmed=False)
-    done_donations = donations.filter(requested=True, confirmed=True)
 
-    if Restaurant.objects.filter(user=request.user).exists():
-        user_type = "R"  # User is a restaurant
-        status = True
-    elif NGO.objects.filter(user=request.user).exists():
-        user_type = "N"  # User is an NGO
-        status = True
-    else:
-        user_type = None  # User doesn't have a recognized role
-        status = False
+@restaurant_required
+@require_POST
+def submit_donation(request):
+    restaurant = request.user.restaurant
+    donation_id = request.session.get('donation_id')
+    ngo_id = request.POST.get('ngo', '')
+    delivery_time = parse_time(request.POST.get('delivery_time', ''))
 
-    filtered_ngos = NGO.objects.all()
-
-    if restaurant.name == "Aquaria":
-        filtered_ngos = filtered_ngos.filter(location='Al-Mina')
-
-    if request.method == 'POST':
-        # Retrieve the form data from the second part of the form
-        ngo = request.POST.get('ngo')
-        delivery_time = request.POST.get('delivery_time')
-
-        donation_id = request.session.get('donation_id')
-        if donation_id:
-            donation = get_object_or_404(Donation, id=donation_id)
-            ngo = get_object_or_404(NGO, name=ngo)
-
-            # Update the existing Donation object with the missing fields
+    if donation_id and ngo_id.isdigit() and delivery_time:
+        ngo = available_ngos(restaurant).filter(pk=int(ngo_id)).first()
+        donation = Donation.objects.filter(
+            pk=donation_id, restaurant=restaurant, ngo__isnull=True
+        ).first()
+        if ngo and donation:
             donation.ngo = ngo
             donation.delivery_time = delivery_time
             donation.save()
-
-            # Perform any necessary actions with the complete form data
-
-            # Clear the donation ID from the session or database
             del request.session['donation_id']
-
-            context = {
-                'donations': donations,
-                'todo_donations': todo_donations,
-                'inprogress_donations': inprogress_donations,
-                'done_donations': done_donations,
-                'ngos': filtered_ngos,
-                'user': user_type,
-                'status': status
-            }
-
-            # Redirect to a success page or perform any other desired actions
-            return render(request, 'donations.html', context)  # Replace with the URL for the success page
-
-    context = {
-        'donations': donations,
-        'todo_donations': todo_donations,
-        'inprogress_donations': inprogress_donations,
-        'done_donations': done_donations,
-        'ngos': filtered_ngos,
-        'user': user_type,
-        'status': status
-    }
-
-    return render(request, 'donations.html', context)
+    return redirect('donate')
 
 
-
-
-@login_required
-def view_donations(request):
-    if request.user.is_authenticated:
-        if Restaurant.objects.filter(user=request.user).exists():
-            user_type = "R"  # User is a restaurant
-            status = True
-        elif NGO.objects.filter(user=request.user).exists():
-            user_type = "N"  # User is an NGO
-            status = True
-        else:
-            user_type = None  # User doesn't have a recognized role
-            status = False
-    else:
-        user_type = None  # User is not authenticated
-    # Check if the user is associated with a restaurant
-    try:
-        ngo = NGO.objects.get(user=request.user)
-    except NGO.DoesNotExist:
-        return render(request, 'browse_donations.html', {'message': 'User does not have a related restaurant.'})
-    
-    # Fetch the donations for the current restaurant
-    donations = Donation.objects.filter(ngo=ngo)
-    
-    return render(request, 'browse_donations.html', {'donations': donations, 'ngo': ngo, 'user': user_type, 'status': status} )
-
-def request_donation(request, donation_name):
-    donation = get_object_or_404(Donation, pk=donation_name)
-
-    if donation.confirmed:
-        # Donation is already confirmed, do nothing
-        pass
-    elif donation.requested:
-        # Undo the donation request
-        donation.requested = False
-        donation.save()
-
-        # Send email to the restaurant notifying them of the request undo
-        restaurant_email = donation.restaurant.contact_email
-        restaurant_name = donation.restaurant.name
-        ngo_name=donation.ngo.name
-        send_request_undo_email(restaurant_email, restaurant_name,ngo_name)
-    else:
-        # Mark the donation as requested by the NGO
-        donation.requested = True
-        donation.save()
-
-        # Send email to the restaurant notifying them of the new request
-        restaurant_email = donation.restaurant.contact_email
-        restaurant_name = donation.restaurant.name
-        ngo_name=donation.ngo.name
-        send_request_email(restaurant_email, restaurant_name,ngo_name)
-
-    return redirect('/browse_donations/')
-
-
-def send_request_email(restaurant_email, restaurant_name, ngo_name):
-    subject = 'New Donation Request'
-    message = f'Dear {restaurant_name}, please check your FoodBridge account. You might have new requests available from {ngo_name}.'
-
-    email = EmailMessage(subject, message, from_email=settings.DEFAULT_FROM_EMAIL, to=[restaurant_email])
-    email.send()
-
-def send_request_undo_email(restaurant_email, restaurant_name, ngo_name):
-    subject = 'Donation Request Undone'
-    message = f'Dear {restaurant_name}, the donation request from {ngo_name} has been undone. Please check your FoodBridge account.'
-
-    email = EmailMessage(subject, message, from_email=settings.DEFAULT_FROM_EMAIL, to=[restaurant_email])
-    email.send()
-
+@restaurant_required
+@require_POST
 def confirm_donation(request, donation_id):
-    donation = get_object_or_404(Donation, pk=donation_id)
+    donation = get_object_or_404(Donation, pk=donation_id, restaurant=request.user.restaurant)
 
-    if not donation.confirmed and donation.requested:
-        # Confirm the donation
+    if donation.requested and not donation.confirmed:
         donation.confirmed = True
         donation.save()
-        
-        #Send confirmation email to NGO
-        ngo_email= donation.ngo.contact_email
-        restaurant_location= donation.restaurant.location 
-        restaurant_number=donation.restaurant.contact_phone
-        ngo_name=donation.ngo.name
-        restaurant_name=donation.restaurant.name
-       
-        send_confirmation_email(ngo_email,restaurant_location,restaurant_number,ngo_name,restaurant_name)
+        body = render_to_string('donation_confirmation.html', {
+            'restaurant_location': donation.restaurant.location,
+            'restaurant_number': donation.restaurant.contact_phone,
+            'ngo_name': donation.ngo.name,
+            'restaurant_name': donation.restaurant.name,
+        })
+        send_email('Donation Confirmation', body, donation.ngo.contact_email, html=True)
+    return redirect('donate')
 
-    return redirect('/donate/')
 
-def send_confirmation_email(ngo_email, restaurant_location,restaurant_number,ngo_name,restaurant_name):
-    subject = 'Donation Confirmation'
-    template = 'donation_confirmation.html'  # Path to your email template
+@restaurant_required
+def charity_view(request):
+    charities = NGO.objects.filter(is_verified=True)
+    return render(request, 'charity.html', page_context(request, charities=charities))
 
-    context = {
-        'restaurant_location': restaurant_location,
-        'restaurant_number': restaurant_number,
-        'ngo_name': ngo_name,
-        'restaurant_name':restaurant_name
-    }
-    email_body = render_to_string(template, context)
 
-    email = EmailMessage(subject, email_body, from_email=settings.DEFAULT_FROM_EMAIL, to=[ngo_email])
-    email.content_subtype = 'html'
-    email.send()
+# NGO side
 
+@ngo_required
+def view_donations(request):
+    ngo = request.user.ngo
+    donations = Donation.objects.filter(ngo=ngo)
+    return render(request, 'browse_donations.html', page_context(request, donations=donations, ngo=ngo))
+
+
+@ngo_required
+@require_POST
+def request_donation(request, donation_id):
+    ngo = request.user.ngo
+    donation = get_object_or_404(Donation, pk=donation_id, ngo=ngo)
+    if donation.confirmed:
+        return redirect('browse_donations')
+
+    donation.requested = not donation.requested
+    donation.save()
+
+    restaurant = donation.restaurant
+    if donation.requested:
+        subject = 'New Donation Request'
+        body = (f'Dear {restaurant.name}, please check your FoodBridge account. '
+                f'You might have new requests available from {ngo.name}.')
+    else:
+        subject = 'Donation Request Undone'
+        body = (f'Dear {restaurant.name}, the donation request from {ngo.name} '
+                f'has been undone. Please check your FoodBridge account.')
+    send_email(subject, body, restaurant.contact_email)
+    return redirect('browse_donations')
+
+
+@ngo_required
+def restaurant_view(request):
+    restaurants = Restaurant.objects.filter(is_verified=True)
+    return render(request, 'restaurant.html', page_context(request, restaurants=restaurants))
+
+
+@ngo_required
+def restaurant_detail(request, restaurant_id):
+    restaurant = get_object_or_404(Restaurant, pk=restaurant_id, is_verified=True)
+    return render(request, 'restaurant_detail.html', {'restaurant': restaurant})
+
+
+# profile
 
 @login_required
 def update_profile(request):
+    role = get_role(request.user)
+    if role is None:
+        return redirect('home')
+
+    form_class, template = PROFILE_FORMS[role]
+    instance = form_class._meta.model.objects.get(user=request.user)  # fresh copy
+
     if request.method == 'POST':
-        profile_picture = request.FILES.get('profile_picture')
-
-        if hasattr(request.user, 'restaurant'):
-            restaurant = request.user.restaurant
-            restaurant.profile_picture = profile_picture
-            restaurant.name = request.POST.get('name', restaurant.name)
-            restaurant.contact_phone = request.POST.get('contact_phone', restaurant.contact_phone)
-            restaurant.location = request.POST.get('location', restaurant.location)
-            restaurant.cuisine_type = request.POST.get('cuisine_type', restaurant.cuisine_type)
-            restaurant.description = request.POST.get('description', restaurant.description)
-            restaurant.save()
-             # Update the username in the User model
-            user = restaurant.user
-            user.username = restaurant.name  # Update the username with the new name
-            user.save()
-            
-        elif hasattr(request.user, 'ngo'):
-            ngo = request.user.ngo
-            ngo.profile_picture = profile_picture
-            ngo.name = request.POST.get('name', ngo.name)
-            ngo.contact_phone = request.POST.get('contact_phone', ngo.contact_phone)
-            ngo.location = request.POST.get('location', ngo.location)
-            ngo.capacity = request.POST.get('capacity')
-            ngo.description = request.POST.get('description')
-            ngo.save()
-          # Update the username in the User model
-            user = ngo.user
-            user.username = ngo.name  # Update the username with the new name
-            user.save()
-        return redirect('home')
-
-    if hasattr(request.user, 'restaurant'):
-        restaurant = request.user.restaurant
-        initial_data = {
-            'name': restaurant.name,
-            'contact_phone': restaurant.contact_phone,
-            'location': restaurant.location,
-            'cuisine_type': restaurant.cuisine_type,
-            'description': restaurant.description,
-            'profile_picture_url': restaurant.profile_picture.url if restaurant.profile_picture else '',
-        }
-        return render(request, 'profile.restaurant.html', initial_data)
-    elif hasattr(request.user, 'ngo'):
-        ngo = request.user.ngo
-        initial_data = {
-            'name': ngo.name,
-            'contact_phone': ngo.contact_phone,
-            'location': ngo.location,
-            'capacity': ngo.capacity,
-            'description': ngo.description,
-            'profile_picture_url': ngo.profile_picture.url if ngo.profile_picture else '',
-        }
-        return render(request, 'profile.ngo.html', initial_data)
+        form = form_class(request.POST, request.FILES, instance=instance)
+        if form.is_valid():
+            with transaction.atomic():
+                profile = form.save()
+                request.user.username = profile.name
+                request.user.save(update_fields=['username'])
+            return redirect('home')
     else:
-        return redirect('home')
+        form = form_class(instance=instance)
+
+    values = {name: form[name].value() for name in form.fields if name != 'profile_picture'}
+    return render(request, template, {'form': form, **values})
